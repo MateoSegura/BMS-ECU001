@@ -102,9 +102,16 @@ void IRAM_ATTR handleInterrupt(); //Ethanol Sensor ISR
 
 void setup() 
 { 
+
+  //LED
+  pixels.begin();
+  pixels.clear();
+  pixels.setPixelColor(0, pixels.Color(0, 0, brightness));
+  pixels.show();
+
   //DAC
   dac.begin(0x60);
-  dac.setVoltage(0,false);   //Set default voltage to 0
+  dac.setVoltage(0,true);   //Set default voltage to 0
   
   //Serial
   if(serial_debugging){
@@ -142,11 +149,6 @@ void setup()
     Serial.println("[BLE] BLE Service is Advertsing and waiting for a connection to notify.");
   }
 
-  //LED
-  pixels.begin();
-  pixels.clear();
-  pixels.setPixelColor(0, pixels.Color(0, 0, brightness));
-  pixels.show();
 }
 
 
@@ -193,7 +195,8 @@ void loop()
     }
 
     //Approximate Voltage Output reading
-    float voltage = map(voltage_dac,0,4095,0,5000);
+    float voltage = map(voltage_dac,0,4095,0,4950);
+    int voltage_int = round(voltage);
 
     if(serial_debugging){
       Serial.print("[SERIAL] Data: "); Serial.print("Frequency: "); Serial.print(round(frequency)); Serial.print("Voltage: "); Serial.println(voltage/1000);
@@ -208,7 +211,7 @@ void loop()
       ble_data += ",";
       ble_data += temperature;
       ble_data += ",";
-      ble_data += voltage;
+      ble_data += voltage_int;
 
       pTxCharacteristic->setValue((char*)ble_data.c_str());
       pTxCharacteristic->notify();
