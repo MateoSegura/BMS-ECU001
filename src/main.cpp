@@ -51,7 +51,7 @@ bool oldDeviceConnected = false;
 
 //DAC
 Adafruit_MCP4725 dac;
-bool output_mode = 0;  //0: 0 TO 5V, 1:0.2 TO 4.5V
+bool output_mode = 1;  //0: 0 TO 5V, 1:0.2 TO 4.5V
 
 //LED
 Adafruit_NeoPixel pixels(1, NEOPIXEL, NEO_GRB + NEO_KHZ800);
@@ -197,22 +197,35 @@ void loop()
 
       portENTER_CRITICAL_ISR(&mux);
       if(output_mode){
+
         //0.5 to 4.5V
         voltage_dac = map(round(frequency),50,150,0,4095);
+
+        if(voltage_dac >= 0 && voltage_dac <= 4095){
+          voltage_dac = voltage_dac;
+        }else if(voltage_dac < 0){
+          voltage_dac = 0; 
+        }else if(voltage_dac > 4095){
+          voltage_dac = 4095;
+        }
+
       }else{
         //0 to 5V
-        voltage_dac = map(round(frequency),50,150,100,3800);
+        voltage_dac = map(round(frequency),50,150,410,3700);
+
+        if(voltage_dac >= 150 && voltage_dac <= 3700){
+          voltage_dac = voltage_dac;
+        }else if(voltage_dac < 410){
+          voltage_dac = 410; 
+        }else if(voltage_dac > 3700){
+          voltage_dac = 3700;
+        }
+
       }
       portEXIT_CRITICAL_ISR(&mux);
     
 
-      if(voltage_dac >= 0 && voltage_dac <= 4095){
-        voltage_dac = voltage_dac;
-      }else if(voltage_dac < 0){
-        voltage_dac = 0; 
-      }else if(voltage_dac > 4095){
-        voltage_dac = 4095;
-      }
+      
 
       //Approximate Voltage Output reading
       float voltage = map(voltage_dac,0,4095,0,4950);
@@ -254,13 +267,13 @@ void handleBluetoothMessage(std::string data){
         //Change mode to 0 to 5V
         Serial.println("0 to 5V output");
         portENTER_CRITICAL_ISR(&mux);
-        output_mode = 0;
+        output_mode = 1;
         portEXIT_CRITICAL_ISR(&mux);
       }else if(data[1] == '0'){
         //Change mode to 0.5 to 4.5V
         Serial.println("0.5 to 4.5V output");
         portENTER_CRITICAL_ISR(&mux);
-        output_mode = 1;
+        output_mode = 0;
         portEXIT_CRITICAL_ISR(&mux);
       }
       break;
