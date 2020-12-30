@@ -6,10 +6,10 @@
 * Last Modified: 12/20/20
 */
 
-//TODO: GET BASIC APP WORKING
 //TODO: 0-5V OR 0.5 TO 4.5V feature
 //TODO: GET TEMPERATURE READING
-//TODO: BLUETOOTH DEBUGGING: VOLTAGE FREQUENCY PULSE WIDTH 
+//TODO: OTA
+//TODO: UUID
 //TODO: CRASH REPORTS AND TIME STAMPING?
 
 /****************************************************************LIBRARIES****************************************************************/
@@ -24,7 +24,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
-/**************************************************************DEFINTIONS*************************************************************/
+// /**************************************************************DEFINTIONS*************************************************************/
 
 //BLE Service Characteristics
 #define BLENAME                "Billet Motorsport ECU001" 
@@ -33,9 +33,9 @@
 
 uint64_t current_sample_time;
 uint64_t last_sample_time;
-uint8_t  sample_frequency = 10;    //Hz
+uint8_t  sample_frequency = 10;    
 
-//Serial debugging
+//Active
 bool serial_debugging = true;
 bool bluetooth_debugging = true;
 
@@ -51,6 +51,7 @@ bool oldDeviceConnected = false;
 
 //DAC
 Adafruit_MCP4725 dac;
+bool output_mode = 0;  //0: 0 TO 5V, 1:0.2 TO 4.5V
 
 //LED
 Adafruit_NeoPixel pixels(1, NEOPIXEL, NEO_GRB + NEO_KHZ800);
@@ -58,8 +59,11 @@ uint8_t brightness = 100;
 
 /**************************************************************Variables*************************************************************/
 
-volatile uint64_t StartValue;                     // First interrupt value
-volatile uint64_t PeriodCount;                    // period in counts of 0.000001 of a second
+bool state = false;                                //Falling
+volatile uint64_t last_rising_time;                     
+volatile uint64_t current_rising_time;        
+volatile uint64_t fallinging_time;   
+volatile uint64_t period_count; 
 float             frequency;                           // frequency     
 char              str[21];                        // for printing uint64_t values
 float temperature; 
@@ -95,6 +99,7 @@ class MyCallbacks: public BLECharacteristicCallbacks {
 //Ethanol In
 void getFrequency(); 
 void ethanolSensorHandle();
+void IRAM_ATTR initialInterrupt();
 void IRAM_ATTR handleInterrupt(); //Ethanol Sensor ISR
 
 
@@ -102,7 +107,7 @@ void IRAM_ATTR handleInterrupt(); //Ethanol Sensor ISR
 
 void setup() 
 { 
-
+  Serial.begin(115200);
   //LED
   pixels.begin();
   pixels.clear();
@@ -116,39 +121,38 @@ void setup()
   //Serial
   if(serial_debugging){
     Serial.begin(115200);
-  }
+  }                                                             
+
+    //BLE
+    BLEDevice::init(BLENAME);
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+
+    pTxCharacteristic = pService->createCharacteristic(
+                        CHARACTERISTIC_UUID,
+                        BLECharacteristic::PROPERTY_READ   |
+                        BLECharacteristic::PROPERTY_WRITE  |
+                        BLECharacteristic::PROPERTY_NOTIFY |
+                        BLECharacteristic::PROPERTY_INDICATE
+                    );
+                        
+    pTxCharacteristic->addDescriptor(new BLE2902());
+    pTxCharacteristic->setCallbacks(new MyCallbacks());
+
+    pService->start();
+    pServer->getAdvertising()->start();
+    
+    if(serial_debugging){
+      Serial.println("[BLE] BLE Service is Advertsing and waiting for a connection to notify.");
+    }
 
   //Ethanol
   pinMode(26, INPUT_PULLUP);  //EN
-  pinMode(ETHANOLIN, INPUT_PULLUP);                                            
-  attachInterrupt(digitalPinToInterrupt(ETHANOLIN), handleInterrupt, FALLING); 
-  timer = timerBegin(0, 80, true);                                                
-  timerStart(timer);                                                              
-
-  //BLE
-  BLEDevice::init(BLENAME);
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-
-  pTxCharacteristic = pService->createCharacteristic(
-										  CHARACTERISTIC_UUID,
-                      BLECharacteristic::PROPERTY_READ   |
-                      BLECharacteristic::PROPERTY_WRITE  |
-                      BLECharacteristic::PROPERTY_NOTIFY |
-                      BLECharacteristic::PROPERTY_INDICATE
-									);
-                      
-  pTxCharacteristic->addDescriptor(new BLE2902());
-  pTxCharacteristic->setCallbacks(new MyCallbacks());
-
-  pService->start();
-  pServer->getAdvertising()->start();
-  
-  if(serial_debugging){
-    Serial.println("[BLE] BLE Service is Advertsing and waiting for a connection to notify.");
-  }
-
+  pinMode(ETHANOLIN, INPUT_PULLUP);                                     
+  attachInterrupt(digitalPinToInterrupt(ETHANOLIN), initialInterrupt, FALLING); 
+  timer = timerBegin(0, 80, true);                                               
+  timerStart(timer); 
 }
 
 
@@ -158,6 +162,7 @@ void loop()
 {
   //Manage BLE Connection
   connectionManager();
+  
 
   //Interval Calculation
   current_sample_time = millis();
@@ -166,56 +171,75 @@ void loop()
 
     last_sample_time = current_sample_time;
 
+    //Temporary Variables
+    float _last_rising_time, _current_rising_time, _falling_time;
+
     //Ethanol Reading
     portENTER_CRITICAL(&mux);
-    frequency =1000000.00/PeriodCount;                       // PeriodCount in 0.000001 of a second
-    portEXIT_CRITICAL(&mux);
 
-    if(frequency >= 0 && frequency <= 150){
-      frequency = frequency;
-    }else if(frequency < 0){
-      frequency = 0;
-    }else if(frequency > 150){
-      frequency = 150;
-    }
+    _current_rising_time = current_rising_time;
+    _falling_time = fallinging_time;
+    _last_rising_time = last_rising_time;
+    frequency =1000000.00/period_count;        
 
-    //Convert frequency to integer for easier processing
-    int frequency_int = round(frequency);
+    portEXIT_CRITICAL_ISR(&mux); 
 
-    //Output Voltage
-    float voltage_dac = map(round(frequency),0,100,0,4095);
+    //Get Wave's pulse width in MS
+    double pulse_width = (_falling_time - _current_rising_time)/1000;
+
+    if(pulse_width > 0){
+
+      //Convert frequency to integer for easier processing
+      int frequency_int = round(frequency);
+
+      //Output Voltage
+      float voltage_dac;
+
+      portENTER_CRITICAL_ISR(&mux);
+      if(output_mode){
+        //0.5 to 4.5V
+        voltage_dac = map(round(frequency),50,150,0,4095);
+      }else{
+        //0 to 5V
+        voltage_dac = map(round(frequency),50,150,100,3800);
+      }
+      portEXIT_CRITICAL_ISR(&mux);
     
 
-    if(voltage_dac >= 0 && voltage_dac <= 4095){
-      voltage_dac = voltage_dac;
-    }else if(voltage_dac < 0){
-      voltage_dac = 0;
-    }else if(voltage_dac > 4095){
-      voltage_dac = 4095;
+      if(voltage_dac >= 0 && voltage_dac <= 4095){
+        voltage_dac = voltage_dac;
+      }else if(voltage_dac < 0){
+        voltage_dac = 0; 
+      }else if(voltage_dac > 4095){
+        voltage_dac = 4095;
+      }
+
+      //Approximate Voltage Output reading
+      float voltage = map(voltage_dac,0,4095,0,4950);
+      int voltage_int = round(voltage);
+
+      if(serial_debugging){
+        Serial.print("[SERIAL] Data: "); Serial.print("Frequency: "); Serial.print(round(frequency)); Serial.print(" Pulse Width: "); Serial.print(pulse_width); Serial.print("Voltage: "); Serial.println(voltage/1000);
+      }
+
+      //Set DAC Output
+      dac.setVoltage(voltage_dac,false);
+
+      //Compose BLE Messgae
+      if(deviceConnected){
+        String ble_data;
+        ble_data += frequency_int;
+        ble_data += ",";
+        ble_data += pulse_width;
+        ble_data += ",";
+        ble_data += voltage_int;
+
+        pTxCharacteristic->setValue((char*)ble_data.c_str());
+        pTxCharacteristic->notify();
+      }
     }
-
-    //Approximate Voltage Output reading
-    float voltage = map(voltage_dac,0,4095,0,4950);
-    int voltage_int = round(voltage);
-
-    if(serial_debugging){
-      Serial.print("[SERIAL] Data: "); Serial.print("Frequency: "); Serial.print(round(frequency)); Serial.print("Voltage: "); Serial.println(voltage/1000);
-    }
-
-    dac.setVoltage(voltage_dac,false);
-
-    //Compose BLE Messgae
-    if(deviceConnected){
-      String ble_data;
-      ble_data += frequency_int;
-      ble_data += ",";
-      ble_data += temperature;
-      ble_data += ",";
-      ble_data += voltage_int;
-
-      pTxCharacteristic->setValue((char*)ble_data.c_str());
-      pTxCharacteristic->notify();
-    }
+       
+    
   }
 }
 
@@ -223,13 +247,26 @@ void loop()
 
 void handleBluetoothMessage(std::string data){
   if (data.length() > 0) {
-        Serial.println("*********");
-        Serial.print("Received Value: ");
-        for (int i = 0; i < data.length(); i++)
-          Serial.print(data[i]);
-
-        Serial.println();
-        Serial.println("*********");
+    switch (data[0])
+    {
+    case 'O':
+      if(data[1] == '1'){
+        //Change mode to 0 to 5V
+        Serial.println("0 to 5V output");
+        portENTER_CRITICAL_ISR(&mux);
+        output_mode = 0;
+        portEXIT_CRITICAL_ISR(&mux);
+      }else if(data[1] == '0'){
+        //Change mode to 0.5 to 4.5V
+        Serial.println("0.5 to 4.5V output");
+        portENTER_CRITICAL_ISR(&mux);
+        output_mode = 1;
+        portEXIT_CRITICAL_ISR(&mux);
+      }
+      break;
+    default:
+      break;
+    }
   }
 }
 
@@ -266,8 +303,19 @@ void connectionManager(){
 void IRAM_ATTR handleInterrupt() 
 {
   portENTER_CRITICAL_ISR(&mux);
-      uint64_t TempVal= timerRead(timer);         // value of timer at interrupt
-      PeriodCount= TempVal - StartValue;          // period count between rising edges in 0.000001 of a second
-      StartValue = TempVal;                       // puts latest reading as start for next calculation
+  if(state){
+    state = !state;
+    last_rising_time = current_rising_time;
+    current_rising_time = timerRead(timer);
+    period_count = current_rising_time - last_rising_time;
+  }else{
+    state = !state;
+    fallinging_time = timerRead(timer);
+  }
   portEXIT_CRITICAL_ISR(&mux);
+}
+
+void IRAM_ATTR initialInterrupt(){
+  detachInterrupt(ETHANOLIN);
+  attachInterrupt(digitalPinToInterrupt(ETHANOLIN), handleInterrupt, CHANGE);
 }
