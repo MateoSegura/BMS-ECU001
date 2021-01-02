@@ -140,8 +140,8 @@ void setup()
     pTxCharacteristic->addDescriptor(new BLE2902());
     pTxCharacteristic->setCallbacks(new MyCallbacks());
 
-    pService->start();
-    pServer->getAdvertising()->start();
+    //pService->start();
+    //pServer->getAdvertising()->start();
     
     if(serial_debugging){
       Serial.println("[BLE] BLE Service is Advertsing and waiting for a connection to notify.");
