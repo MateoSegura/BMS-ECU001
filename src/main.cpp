@@ -161,8 +161,7 @@ void setup()
 void loop() 
 {
   //Manage BLE Connection
-  connectionManager();
-  
+  //connectionManager();
 
   //Interval Calculation
   current_sample_time = millis();
